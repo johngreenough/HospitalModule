@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import joblib
 
+CLEANED_DATA_PATH = "cleaned.csv"
 
 DEPARTMENTS = ["Emergency", "Surgery", "Critical Care", "Step Down"]
 
@@ -39,17 +40,39 @@ def load_model():
     return model
 
 
+@st.cache_data
+def load_ktas5_exit_policy(path=CLEANED_DATA_PATH):
+    try:
+        df = pd.read_csv(path)
+        if "Unnamed: 0" in df.columns:
+            df = df.drop(columns=["Unnamed: 0"])
+        if "KTAS_expert" not in df.columns:
+            raise ValueError("KTAS_expert column not found in cleaned.csv")
+
+        ktas_series = pd.to_numeric(df["KTAS_expert"], errors="coerce").dropna()
+        total = int(len(ktas_series))
+        ktas5_count = int((ktas_series == 5).sum())
+        rate = float(ktas5_count / total) if total > 0 else 0.0
+        return {"rate": rate, "count": ktas5_count, "total": total}
+    except Exception:
+        return {"rate": 0.0, "count": 0, "total": 0}
+
+
 def bounded_normal_sample(rng, low, high, mean):
     std = max((high - low) / 6.0, 1e-6)
     return float(np.clip(rng.normal(loc=mean, scale=std), low, high))
 
 
-def simulate_next_hour(waiting_patients, rng):
+def simulate_next_hour(waiting_patients, rng, ktas5_exit_rate):
     patients = {dept: float(waiting_patients[dept]) for dept in DEPARTMENTS}
 
     for dept in DEPARTMENTS:
         low, high, mean = ARRIVAL_RULES[dept]
-        patients[dept] += bounded_normal_sample(rng, low, high, mean)
+        arrivals = bounded_normal_sample(rng, low, high, mean)
+        if dept == "Emergency":
+            # KTAS 5 patients are discharged home immediately on arrival.
+            arrivals *= max(0.0, 1.0 - float(ktas5_exit_rate))
+        patients[dept] += arrivals
 
     inbound_transfers = {dept: 0.0 for dept in DEPARTMENTS}
 
@@ -81,12 +104,14 @@ def simulate_next_hour(waiting_patients, rng):
     return patients
 
 
-def forecast_staffing(free_workers, waiting_patients, simulations, confidence):
+def forecast_staffing(
+    free_workers, waiting_patients, simulations, confidence, ktas5_exit_rate
+):
     rng = np.random.default_rng()
     sim_results = {dept: [] for dept in DEPARTMENTS}
 
     for _ in range(simulations):
-        end_hour = simulate_next_hour(waiting_patients, rng)
+        end_hour = simulate_next_hour(waiting_patients, rng, ktas5_exit_rate)
         for dept in DEPARTMENTS:
             sim_results[dept].append(end_hour[dept])
 
@@ -117,6 +142,8 @@ def forecast_staffing(free_workers, waiting_patients, simulations, confidence):
 
 
 model = load_model()
+ktas5_policy = load_ktas5_exit_policy()
+KTAS5_EXIT_RATE = ktas5_policy["rate"]
 
 st.title("Hospital Triage Decision Support System")
 
@@ -168,6 +195,10 @@ with triage_tab:
             decoded_pred = pred + 1
 
             st.success(f"Predicted Triage Level: **KTAS {decoded_pred}**")
+            if decoded_pred == 5:
+                st.warning(
+                    "Policy triggered: KTAS 5 patients are discharged home immediately and removed from the ED system."
+                )
 
             proba_df = pd.DataFrame(
                 proba, columns=[f"KTAS {i + 1}" for i in range(proba.shape[1])]
@@ -187,6 +218,16 @@ with staffing_tab:
     st.caption(
         "Forecast assumes 1 patient requires 1 worker. Recommendations are based on a simulation percentile."
     )
+    if ktas5_policy["total"] > 0:
+        st.caption(
+            f"KTAS 5 immediate-home policy active for Emergency arrivals using cleaned.csv frequency: "
+            f"{ktas5_policy['count']}/{ktas5_policy['total']} ({KTAS5_EXIT_RATE * 100:.2f}%)."
+        )
+    else:
+        st.caption(
+            "KTAS 5 immediate-home policy active, but cleaned.csv KTAS_expert frequency could not be loaded. "
+            "Fallback rate: 0.00%."
+        )
 
     worker_cols = st.columns(4)
     waiting_cols = st.columns(4)
@@ -216,6 +257,7 @@ with staffing_tab:
             waiting_patients=waiting_patients,
             simulations=int(simulations),
             confidence=float(confidence),
+            ktas5_exit_rate=KTAS5_EXIT_RATE,
         )
         st.dataframe(result_df, use_container_width=True)
 
