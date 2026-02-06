@@ -13,7 +13,7 @@ Streamlit app with:
 - `app.py`: Streamlit dashboard with `Triage` and `Staffing` tabs
 - `model.ipynb`: model training and evaluation notebook
 - `cleaned.csv`: processed dataset for model development and analysis
-- `MSE 436 Dataset.csv`: original dataset
+- `MSE 433 Dataset.csv`: original dataset
 - `best_triage_model.pkl`: trained model loaded by `app.py`
 - `requirements.txt`: Python dependencies
 
